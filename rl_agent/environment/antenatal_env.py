@@ -434,10 +434,145 @@ class AntenatalCareEnv(gym.Env):
         done = self.current_state['Visit'] >= 9
         return self.current_state, reward, done, False, {}
 
+    def __init__(self, data_path=None):
+        """
+        Initialize the environment, optionally with a path to real/synthetic data.
+        
+        Args:
+            data_path (str, optional): Path to a CSV file containing patient data.
+        """
+        super().__init__()
+        
+        # Store data path
+        self.data_path = data_path
+        self.data = None
+        self.current_data_index = 0
+        
+        # If data path is provided, load the data
+        if data_path:
+            import pandas as pd
+            self.data = pd.read_csv(data_path)
+            # Normalize column names to match state space
+            self.data = self.data.rename(columns={
+                'Diastolic': 'Diastolic_BP',  # Fix column name difference
+            })
+
+        # Define the observation space (13 features)
+        self.observation_space = spaces.Dict({
+            'Age': spaces.Box(low=0, high=100, shape=(1,), dtype=np.float32),
+            'Previous_Complications': spaces.Discrete(2),
+            'Preexisting_Diabetes': spaces.Discrete(2),
+            'Visit': spaces.Discrete(10),  # Visits 1-9
+            'Systolic_BP': spaces.Box(low=0, high=250, shape=(1,), dtype=np.float32),
+            'Diastolic_BP': spaces.Box(low=0, high=150, shape=(1,), dtype=np.float32),
+            'BS': spaces.Box(low=0, high=500, shape=(1,), dtype=np.float32),
+            'Body_Temp': spaces.Box(low=35, high=42, shape=(1,), dtype=np.float32),
+            'BMI': spaces.Box(low=10, high=50, shape=(1,), dtype=np.float32),
+            'Heart_Rate': spaces.Box(low=40, high=200, shape=(1,), dtype=np.float32),
+            'Gestational_Diabetes': spaces.Discrete(2),
+            'Mental_Health': spaces.Discrete(2),
+            'Risk_Level': spaces.Discrete(2)
+        })
+        
+        # Define action space (15 possible actions)
+        self.action_space = spaces.Discrete(15)
+        
+        # Action mapping
+        self.actions = {
+            0: 'Routine_Bundle',
+            1: 'Order_Repeat_BP',
+            2: 'Refer_ED',
+            3: 'Order_OGTT',
+            4: 'Nutrition_Counsel',
+            5: 'Glucose_Education',
+            6: 'Insulin_Escalation',
+            7: 'MH_Referral',
+            8: 'Danger_Sign_Education',
+            9: 'Fetal_Movement_Edu',
+            10: 'Order_Growth_US',
+            11: 'Give_Tetanus_Toxoid',
+            12: 'Schedule_Extra_Visit',
+            13: 'Schedule_Specialist_HTN',
+            14: 'Plan_Induction'
+        }
+
+    def reset_from_data(self):
+        """Reset the environment using a row from the loaded data."""
+        if self.data is None:
+            raise ValueError("No data loaded. Please provide data_path in constructor.")
+            
+        # Get the next row from data
+        row = self.data.iloc[self.current_data_index]
+        self.current_data_index = (self.current_data_index + 1) % len(self.data)
+        
+        # Clear intervention tracking flags
+        tracking_attrs = [
+            'htn_specialist_referred',
+            'extra_visit_scheduled',
+            'ogtt_ordered',
+            'glucose_education_given',
+            'mh_referred',
+            'nutrition_counseled',
+            'danger_signs_taught',
+            'fetal_movement_taught',
+            'tetanus_given_visit_2',
+            'tetanus_given_visit_4',
+            'actions_this_visit',
+            'next_visit'
+        ]
+        for attr in tracking_attrs:
+            if hasattr(self, attr):
+                delattr(self, attr)
+        
+        # Convert data values to appropriate types and ranges
+        age = np.clip(row['Age'], 16, 45)
+        prev_complications = int(row['Previous_Complications'] > 0.5)  # Convert to binary
+        preexisting_diabetes = int(row['Preexisting_Diabetes'] > 0.5)  # Convert to binary
+        systolic_bp = row['Systolic_BP']
+        diastolic_bp = row['Diastolic_BP']
+        blood_sugar = max(0, row['BS'])  # Ensure non-negative
+        body_temp = row['Body_Temp']
+        bmi = row['BMI']
+        heart_rate = row['Heart_Rate']
+        mental_health = int(row['Mental_Health'] > 0.5)  # Convert to binary
+        gestational_diabetes = int(row['Gestational_Diabetes'] > 0.5)  # Convert to binary
+        
+        # Compute initial risk level
+        high_risk_conditions = sum([
+            age < 18 or age >= 35,
+            prev_complications == 1,
+            preexisting_diabetes == 1,
+            systolic_bp >= 140 or diastolic_bp >= 90,
+            bmi < 18.5 or bmi >= 30
+        ])
+        risk_level = int(high_risk_conditions >= 1)
+        
+        # Initialize state with data values
+        self.current_state = {
+            'Age': np.array([age], dtype=np.float32),
+            'Previous_Complications': prev_complications,
+            'Preexisting_Diabetes': preexisting_diabetes,
+            'Visit': 1,  # Always start at visit 1
+            'Systolic_BP': np.array([systolic_bp], dtype=np.float32),
+            'Diastolic_BP': np.array([diastolic_bp], dtype=np.float32),
+            'BS': np.array([blood_sugar], dtype=np.float32),
+            'Body_Temp': np.array([body_temp], dtype=np.float32),
+            'BMI': np.array([bmi], dtype=np.float32),
+            'Heart_Rate': np.array([heart_rate], dtype=np.float32),
+            'Gestational_Diabetes': gestational_diabetes,
+            'Mental_Health': mental_health,
+            'Risk_Level': risk_level
+        }
+        
+        return self.current_state, {}
+
     def reset(self, seed=None):
         """Reset the environment to initial state."""
         super().reset(seed=seed)
         
+        if self.data is not None:
+            return self.reset_from_data()
+            
         # Clear all intervention tracking flags
         tracking_attrs = [
             'htn_specialist_referred',
